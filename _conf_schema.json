@@ -1,0 +1,189 @@
+{
+    "api_bearer_token": {
+        "description": "X API Bearer Token",
+        "type": "string",
+        "hint": "X (Twitter) API v2 的 Bearer Token，用于 App-Only 模式的只读操作鉴权。可在 X Developer Portal 获取。当配置了 OAuth 1.0a 全部 4 个凭据时，此 Token 作为降级备用。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "api_key": {
+        "description": "Consumer Key (API Key)",
+        "type": "string",
+        "hint": "OAuth 1.0a 的 Consumer Key（也称 API Key / App Key / oauth_consumer_key）。与 Consumer Secret + Access Token + Access Token Secret 共同组成 OAuth 1.0a 用户上下文认证。可在 X Developer Console 的 Keys and Tokens 页面获取。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "api_key_secret": {
+        "description": "Consumer Secret (API Key Secret)",
+        "type": "string",
+        "hint": "OAuth 1.0a 的 Consumer Secret（也称 API Secret Key / App Key Secret / oauth_consumer_secret）。用于 HMAC-SHA1 签名计算。在 X Developer Console 创建 App 时只显示一次，请妥善保存。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "oauth_access_token": {
+        "description": "Access Token (OAuth 1.0a)",
+        "type": "string",
+        "hint": "OAuth 1.0a 的 Access Token（oauth_token）。代表用户授权您的应用程序访问其账户。可在 X Developer Console 的 Keys and Tokens 页面生成。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "oauth_access_token_secret": {
+        "description": "Access Token Secret (OAuth 1.0a)",
+        "type": "string",
+        "hint": "OAuth 1.0a 的 Access Token Secret（oauth_token_secret）。与 Access Token 配对使用，用于 HMAC-SHA1 签名计算。在生成时只显示一次，请妥善保存。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "fallback_cookie": {
+        "description": "降级备用 Cookie",
+        "type": "text",
+        "hint": "当官方 API 额度耗尽或遭遇权限限制时，用于激活网页模拟抓取链路的浏览器 Cookie。从浏览器开发者工具中复制完整的 Cookie 字符串。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "enable_proxy": {
+        "description": "启用网络代理",
+        "type": "bool",
+        "hint": "开启后，插件的所有 X API 请求与媒体下载将通过代理进行。推荐在中国大陆等地区启用。",
+        "default": true
+    },
+    "proxy_url": {
+        "description": "代理地址",
+        "type": "string",
+        "hint": "HTTP 代理地址，默认对接本地 Clash 等代理内核。格式: http://IP:端口",
+        "default": "http://127.0.0.1:7890"
+    },
+    "max_return_count": {
+        "description": "单次API请求最大推文数",
+        "type": "int",
+        "hint": "⚠️ 性能提示：数值越大，单次请求返回的推文越多，消息处理和渲染耗时成正比增加。低性能设备或高延迟网络建议保持默认值10。最大值100为X API v2单次请求上限。",
+        "default": 10,
+        "slider": {
+            "min": 10,
+            "max": 100,
+            "step": 10
+        }
+    },
+    "enable_public_metrics": {
+        "description": "显示互动指标",
+        "type": "bool",
+        "hint": "开启后，推文结果中将包含点赞数、转发数等公共互动指标。",
+        "default": true
+    },
+    "forward_threshold_mb": {
+        "description": "大文件拦截阈值 (MB)",
+        "type": "int",
+        "hint": "超过此体积的媒体文件将被拦截，仅输出直链地址而不下载转发。单位: MB",
+        "default": 25,
+        "slider": {
+            "min": 5,
+            "max": 200,
+            "step": 5
+        }
+    },
+    "pil_compress_target_kb": {
+        "description": "图片压缩目标大小 (KB)",
+        "type": "int",
+        "hint": "略微超标的图片将通过 PIL 压缩至此目标大小后再行转发。设为 0 表示不压缩。单位: KB",
+        "default": 2048,
+        "slider": {
+            "min": 0,
+            "max": 20480,
+            "step": 256
+        }
+    },
+    "display_media_details": {
+        "description": "展示媒体详细信息",
+        "type": "bool",
+        "hint": "开启后，向智能体展示媒体的具体尺寸、类型等详细信息。",
+        "default": true
+    },
+    "acl_mode": {
+        "description": "访问控制模式",
+        "type": "string",
+        "hint": "黑白名单安全系统的运行模式。Off = 关闭（允许所有访问）；Whitelist = 白名单模式（仅允许名单内的群组/用户，名单为空时不做限制）；Blacklist = 黑名单模式（拒绝名单内的群组/用户）。",
+        "default": "Off",
+        "options": [
+            "Off",
+            "Whitelist",
+            "Blacklist"
+        ]
+    },
+    "allowed_list": {
+        "description": "白名单",
+        "type": "list",
+        "hint": "填写允许访问的会话ID（可在聊天中使用 sid 命令获取）。白名单为空时不做限制。",
+        "default": []
+    },
+    "banned_list": {
+        "description": "黑名单",
+        "type": "list",
+        "hint": "填写禁止访问的会话ID（可在聊天中使用 sid 命令获取）。",
+        "default": []
+    },
+    "cache_expire_days": {
+        "description": "缓存自动清理天数",
+        "type": "int",
+        "hint": "媒体缓存文件（图片、缩略图、视频）超过此天数后自动清理。设为 0 表示不自动清理。",
+        "default": 3,
+        "slider": {
+            "min": 1,
+            "max": 30,
+            "step": 1
+        }
+    },
+    "fetch_count": {
+        "description": "每页显示推文条数",
+        "type": "int",
+        "hint": "每次搜索/趋势/时间线显示的推文数量。翻页时也按此数量加载。有效范围: 1-10。",
+        "default": 3,
+        "min": 1,
+        "max": 10
+    },
+    "enable_group_isolation": {
+        "description": "群组缓存隔离",
+        "type": "bool",
+        "hint": "开启后，群组内每个成员拥有独立的搜索/趋势/时间线缓存与翻页状态。关闭时群组内共用一个缓存列表。私聊不受影响。",
+        "default": false
+    },
+    "max_cache_items": {
+        "description": "最大翻页累积条数",
+        "type": "int",
+        "hint": "翻页时允许累积的最大条目数量。超过此限制后将无法继续翻页。有效范围: 10-50。",
+        "default": 50,
+        "min": 10,
+        "max": 50
+    },
+    "search_sort_order": {
+        "description": "搜索排序方式",
+        "type": "string",
+        "hint": "控制推文搜索结果的排序方式。relevancy = 按相关度排序；recency = 按时间倒序。注意：API 的 relevancy 与 X 网页端「热门」标签算法不同，效果有限。",
+        "default": "relevancy",
+        "options": [
+            "relevancy",
+            "recency"
+        ]
+    },
+    "search_min_faves": {
+        "description": "搜索最低点赞数过滤",
+        "type": "int",
+        "hint": "搜索后在本地过滤点赞数低于此值的推文。设为0表示不过滤。配合「搜索过滤最大轮次」使用：轮次大于0时，不足的推文会通过额外API请求补充。",
+        "default": 0,
+        "slider": {
+            "min": 0,
+            "max": 300,
+            "step": 5
+        }
+    },
+    "search_filter_max_rounds": {
+        "description": "搜索过滤最大轮次",
+        "type": "int",
+        "hint": "⚠️ 费用提示：启用「搜索最低点赞数过滤」时，若单次请求中符合条件的推文不足，将自动发起额外请求循环拉取。每轮消耗1次API请求配额。设为0则不进入循环（只从首次请求中过滤）。",
+        "default": 0,
+        "slider": {
+            "min": 0,
+            "max": 10,
+            "step": 1
+        }
+    }
+}

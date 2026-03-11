@@ -1,0 +1,7 @@
+name: astrbot_plugin_Xagent_searcher 
+display_name: 推特解析 
+desc: 使用X官方API来解析推特(X),获取推特的文本内容、图片和视频等信息。  
+version: v0.0.3 # 插件版本号。
+astrbot_version: ">=4.0.0"
+author: B2347 # 作者
+repo: https://github.com/NorNeko/astrbot_plugin_Xagent_searcher 
