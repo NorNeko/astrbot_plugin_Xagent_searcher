@@ -27,6 +27,7 @@ import urllib.parse
 from base64 import b64encode
 from typing import Optional, Dict, Any
 from datetime import datetime
+import json
 import httpx
 
 from astrbot.api import logger
@@ -36,6 +37,51 @@ from ..models.x_response_models import (
     UserTimelineResponse, 
     TrendsResponse,
     UserLookupResponse
+)
+
+
+# Twitter 网页端内嵌的公开客户端 Bearer Token（Twitter Web App 全局固定值）
+# 该 Token 不代表任何用户，是 Twitter 自身网页客户端对内部 API 的公开应用凭证。
+# 已由 snscrape 等多个知名开源项目长期验证，保持稳定。
+_TWITTER_WEB_BEARER = (
+    "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs="
+    "1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+)
+
+# GraphQL TweetResultByRestId 端点配置
+# queryId 为 Twitter 前端部署期变量，随前端更新可能变更；
+# 可在 WebUI 中通过 graphql_tweet_query_id 字段覆写
+# （浏览器 F12 → Network → 过滤 TweetResultByRestId 请求获取最新值）。
+_GRAPHQL_TWEET_QUERY_ID = "0hWvDhmW8YQ-S_ib3azIrw"
+
+# features 参数：与 Twitter Web App 默认特性集合对齐（控制响应中包含的数据集合）
+_GRAPHQL_TWEET_FEATURES = json.dumps(
+    {
+        "creator_subscriptions_tweet_preview_api_enabled": True,
+        "communities_web_enable_tweet_community_results_fetch": True,
+        "c9s_tweet_anatomy_moderator_badge_enabled": True,
+        "articles_preview_enabled": True,
+        "responsive_web_edit_tweet_api_enabled": True,
+        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+        "view_counts_everywhere_api_enabled": True,
+        "longform_notetweets_consumption_enabled": True,
+        "responsive_web_twitter_article_tweet_consumption_enabled": True,
+        "tweet_awards_web_tipping_enabled": False,
+        "creator_subscriptions_quote_tweet_preview_enabled": False,
+        "freedom_of_speech_not_reach_fetch_enabled": True,
+        "standardized_nudges_misinfo": True,
+        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+        "rweb_video_timestamps_enabled": True,
+        "longform_notetweets_rich_text_read_enabled": True,
+        "longform_notetweets_inline_media_enabled": True,
+        "rweb_tipjar_consumption_enabled": True,
+        "responsive_web_graphql_exclude_directive_enabled": True,
+        "verified_phone_label_enabled": False,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+        "responsive_web_graphql_timeline_navigation_enabled": True,
+        "responsive_web_enhance_cards_enabled": False,
+    },
+    separators=(",", ":"),
 )
 
 
@@ -62,7 +108,9 @@ class XApiClient:
         api_key_secret: Optional[str] = None,
         oauth_access_token: Optional[str] = None,
         oauth_access_token_secret: Optional[str] = None,
-        fallback_cookie: Optional[str] = None,
+        cookie_auth_token: Optional[str] = None,
+        cookie_ct0: Optional[str] = None,
+        graphql_tweet_query_id: Optional[str] = None,
         enable_proxy: bool = True,
         proxy_url: str = "http://127.0.0.1:7890"
     ):
@@ -72,7 +120,7 @@ class XApiClient:
         认证优先级（三级降级策略）：
         1. OAuth 1.0a 用户上下文（需要全部 4 个凭据）—— 拥有完整的用户级权限
         2. OAuth 2.0 App-Only Bearer Token —— 仅限公开数据的只读操作
-        3. Cookie 降级模拟 —— 最终降级方案
+        3. Cookie 降级 —— 当 API 额度耗尽或权限不足时，通过 Twitter 网页端内部 API 获取数据
         
         Args:
             bearer_token (str): OAuth 2.0 Bearer Token（备用认证）
@@ -80,7 +128,9 @@ class XApiClient:
             api_key_secret (str, optional): Consumer Secret / API Key Secret（OAuth 1.0a）
             oauth_access_token (str, optional): Access Token（OAuth 1.0a）
             oauth_access_token_secret (str, optional): Access Token Secret（OAuth 1.0a）
-            fallback_cookie (str, optional): Cookie 降级方案（当 API 认证均失败时使用）
+            cookie_auth_token (str, optional): Twitter 网页端登录凭证（auth_token Cookie 值）
+            cookie_ct0 (str, optional): Twitter CSRF 防护令牌（ct0 Cookie 值，与 auth_token 配对）
+            graphql_tweet_query_id (str, optional): GraphQL TweetResultByRestId queryId（留空使用内置默认值）
             enable_proxy (bool): 是否启用代理（默认 True）
             proxy_url (str): 代理地址（默认 http://127.0.0.1:7890 - Clash）
             
@@ -94,7 +144,9 @@ class XApiClient:
         self.api_key_secret = api_key_secret
         self.oauth_access_token = oauth_access_token
         self.oauth_access_token_secret = oauth_access_token_secret
-        self.fallback_cookie = fallback_cookie
+        self.cookie_auth_token = cookie_auth_token
+        self.cookie_ct0 = cookie_ct0
+        self.graphql_tweet_query_id = graphql_tweet_query_id or ""
         self.enable_proxy = enable_proxy
         self.proxy_url = proxy_url
         
@@ -106,6 +158,9 @@ class XApiClient:
             self.oauth_access_token_secret
         ])
         
+        # 判定 Cookie 降级是否可用（auth_token 与 ct0 必须同时配置）
+        self.cookie_available = bool(self.cookie_auth_token and self.cookie_ct0)
+        
         # 初始化异步 HTTP 客户端
         # 规范要求：必须使用 httpx.AsyncClient，支持 HTTP/2、连接池、代理隧道
         self.client = None
@@ -114,11 +169,13 @@ class XApiClient:
         auth_mode = (
             "OAuth 1.0a（用户上下文）" if self.oauth1_available
             else "Bearer Token（App-Only）" if self.bearer_token
-            else "无认证（仅 Cookie 降级）"
+            else "Cookie 降级（v1.1 内部 API）" if self.cookie_available
+            else "无认证"
         )
         logger.info(
             f"XApiClient 已初始化 | "
             f"认证模式: {auth_mode} | "
+            f"Cookie 降级: {'已就绪' if self.cookie_available else '未配置'} | "
             f"Proxy: {'已启用 (' + proxy_url + ')' if enable_proxy else '已禁用'}"
         )
     
@@ -248,7 +305,389 @@ class XApiClient:
         )
         
         return auth_header
-    
+
+    # ========================================================================
+    # Cookie 降级认证 — v1.1 内部 API 通道
+    # ========================================================================
+
+    def _build_cookie_auth_headers(self) -> Dict[str, str]:
+        """构建 Cookie 降级认证所需的完整请求头（适用于 Twitter v1.1 内部 API）"""
+        return {
+            "Authorization": f"Bearer {_TWITTER_WEB_BEARER}",
+            "Cookie": f"auth_token={self.cookie_auth_token}; ct0={self.cookie_ct0}",
+            "x-csrf-token": self.cookie_ct0 or "",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "x-twitter-active-user": "yes",
+            "x-twitter-auth-type": "OAuth2Session",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://twitter.com/",
+        }
+
+    @staticmethod
+    def _parse_v1_datetime(date_str: str) -> Optional[str]:
+        """将 v1.1 API 的日期格式 ("Thu Apr 06 15:28:43 +0000 2023") 转换为 ISO 8601"""
+        if not date_str:
+            return None
+        try:
+            dt = datetime.strptime(date_str, "%a %b %d %H:%M:%S %z %Y")
+            return dt.isoformat()
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _adapt_v1_media(v1_media: dict) -> dict:
+        """将 v1.1 媒体对象转换为 v2 兼容格式"""
+        media_id = v1_media.get("id_str", "")
+        media_key = f"3_{media_id}"
+        media_type = v1_media.get("type", "photo")
+        result: Dict[str, Any] = {"media_key": media_key, "type": media_type}
+        if media_type == "photo":
+            result["url"] = v1_media.get("media_url_https", "")
+        else:
+            result["preview_image_url"] = v1_media.get("media_url_https", "")
+            video_info = v1_media.get("video_info", {})
+            variants = []
+            for v in video_info.get("variants", []):
+                variant = {
+                    "content_type": v.get("content_type", ""),
+                    "url": v.get("url", ""),
+                }
+                if "bitrate" in v:
+                    variant["bit_rate"] = v["bitrate"]
+                variants.append(variant)
+            result["variants"] = variants
+            if "duration_millis" in video_info:
+                result["duration_ms"] = video_info["duration_millis"]
+        return result
+
+    def _adapt_v1_tweets_to_v2(self, v1_tweets: list) -> dict:
+        """将 v1.1 推文列表适配为 v2 data/includes 结构"""
+        tweets_v2: list = []
+        users_map: dict = {}
+        media_list: list = []
+
+        for v1_tweet in v1_tweets:
+            v1_user = v1_tweet.get("user", {})
+            author_id = v1_user.get("id_str", "")
+            tweet_media_keys: list = []
+
+            # 处理媒体附件（优先 extended_entities，保留 GIF/视频变体）
+            ext_ent = v1_tweet.get("extended_entities") or v1_tweet.get("entities") or {}
+            for m in ext_ent.get("media", []):
+                adapted_media = self._adapt_v1_media(m)
+                media_list.append(adapted_media)
+                tweet_media_keys.append(adapted_media["media_key"])
+
+            tweet_v2: Dict[str, Any] = {
+                "id": v1_tweet.get("id_str", ""),
+                "text": v1_tweet.get("full_text", v1_tweet.get("text", "")),
+                "author_id": author_id,
+                "created_at": self._parse_v1_datetime(v1_tweet.get("created_at")),
+                "public_metrics": {
+                    "like_count": v1_tweet.get("favorite_count", 0),
+                    "retweet_count": v1_tweet.get("retweet_count", 0),
+                    "reply_count": v1_tweet.get("reply_count", 0),
+                },
+                "edit_history_tweet_ids": [v1_tweet.get("id_str", "")],
+                "lang": v1_tweet.get("lang"),
+            }
+            if tweet_media_keys:
+                tweet_v2["attachments"] = {"media_keys": tweet_media_keys}
+            tweets_v2.append(tweet_v2)
+
+            if author_id and author_id not in users_map:
+                users_map[author_id] = {
+                    "id": author_id,
+                    "name": v1_user.get("name", ""),
+                    "username": v1_user.get("screen_name", ""),
+                    "profile_image_url": v1_user.get("profile_image_url_https", ""),
+                }
+
+        return {
+            "data": tweets_v2,
+            "includes": {"users": list(users_map.values()), "media": media_list},
+            "meta": {},
+        }
+
+    def _translate_v2_to_v1_url(
+        self, v2_url: str, v2_params: Dict[str, Any]
+    ) -> tuple:
+        """
+        将 v2 API URL 和参数翻译为 v1.1 等价调用。
+
+        Returns:
+            tuple: (v1_url, v1_params, endpoint_type)
+        """
+        if "/2/tweets/search/recent" in v2_url:
+            v1_params = {
+                "q": v2_params.get("query", ""),
+                "count": min(int(v2_params.get("max_results", 20)), 100),
+                "result_type": "recent",
+                "include_entities": "true",
+                "tweet_mode": "extended",
+            }
+            return "https://twitter.com/i/api/1.1/search/tweets.json", v1_params, "search"
+
+        m = re.match(r".*/2/tweets/(\d+)$", v2_url)
+        if m:
+            return (
+                "https://twitter.com/i/api/1.1/statuses/show.json",
+                {"id": m.group(1), "include_entities": "true", "tweet_mode": "extended"},
+                "tweet",
+            )
+
+        m = re.match(r".*/2/users/(\d+)/tweets$", v2_url)
+        if m:
+            return (
+                "https://twitter.com/i/api/1.1/statuses/user_timeline.json",
+                {
+                    "user_id": m.group(1),
+                    "count": min(int(v2_params.get("max_results", 20)), 200),
+                    "include_rts": "true",
+                    "exclude_replies": "false",
+                    "tweet_mode": "extended",
+                },
+                "timeline",
+            )
+
+        m = re.match(r".*/2/users/by/username/([^/]+)$", v2_url)
+        if m:
+            return (
+                "https://twitter.com/i/api/1.1/users/show.json",
+                {"screen_name": m.group(1), "include_entities": "false"},
+                "user_lookup",
+            )
+
+        raise ValueError(f"❌ Cookie 降级认证不支持该 API 端点：{v2_url}")
+
+    def _adapt_v1_response(self, v1_data: Any, endpoint_type: str) -> dict:
+        """将 v1.1 响应数据适配为 v2 兼容格式"""
+        if endpoint_type == "search":
+            return self._adapt_v1_tweets_to_v2(v1_data.get("statuses", []))
+        elif endpoint_type == "tweet":
+            adapted = self._adapt_v1_tweets_to_v2([v1_data])
+            return {
+                "data": adapted["data"][0] if adapted["data"] else {},
+                "includes": adapted["includes"],
+            }
+        elif endpoint_type == "timeline":
+            return self._adapt_v1_tweets_to_v2(
+                v1_data if isinstance(v1_data, list) else []
+            )
+        elif endpoint_type == "user_lookup":
+            return {
+                "data": {
+                    "id": v1_data.get("id_str", ""),
+                    "name": v1_data.get("name", ""),
+                    "username": v1_data.get("screen_name", ""),
+                    "profile_image_url": v1_data.get("profile_image_url_https", ""),
+                }
+            }
+        return v1_data
+
+    def _adapt_graphql_tweet_response(self, gql_data: dict) -> dict:
+        """将 GraphQL TweetResultByRestId 响应适配为 v2 兼容的单推文格式。"""
+        result = (
+            gql_data
+            .get("data", {})
+            .get("tweetResult", {})
+            .get("result", {})
+        )
+        # __typename 可能为 "Tweet" 或 "TweetUnavailable"（限制访问/已删除）
+        if not result or result.get("__typename") != "Tweet":
+            return {"data": {}, "includes": {"users": [], "media": []}}
+        legacy = result.get("legacy", {})
+        user_legacy = (
+            result
+            .get("core", {})
+            .get("user_results", {})
+            .get("result", {})
+            .get("legacy", {})
+        )
+        # GraphQL legacy 字段与 v1.1 字段高度兼容，复用现有适配器
+        v1_like = {
+            "id_str": legacy.get("id_str", ""),
+            "full_text": legacy.get("full_text", legacy.get("text", "")),
+            "created_at": legacy.get("created_at", ""),
+            "favorite_count": legacy.get("favorite_count", 0),
+            "retweet_count": legacy.get("retweet_count", 0),
+            "reply_count": legacy.get("reply_count", 0),
+            "lang": legacy.get("lang"),
+            "extended_entities": legacy.get("extended_entities"),
+            "entities": legacy.get("entities"),
+            "user": {
+                "id_str": user_legacy.get("id_str", ""),
+                "name": user_legacy.get("name", ""),
+                "screen_name": user_legacy.get("screen_name", ""),
+                "profile_image_url_https": user_legacy.get("profile_image_url_https", ""),
+            },
+        }
+        adapted_list = self._adapt_v1_tweets_to_v2([v1_like])
+        return {
+            "data": adapted_list["data"][0] if adapted_list["data"] else {},
+            "includes": adapted_list["includes"],
+        }
+
+    async def _make_graphql_tweet_request(
+        self,
+        tweet_id: str,
+        headers: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        使用 GraphQL TweetResultByRestId 端点获取单条推文（Cookie 降级认证专用）。
+
+        Twitter v1.1 statuses/show.json 对 Cookie 鉴权已失效；
+        Twitter Web 客户端已全面迁移至 GraphQL，此方法复现该行为。
+        queryId 为 Twitter 前端部署期变量，可在 WebUI 中通过 graphql_tweet_query_id 覆写。
+        """
+        query_id = self.graphql_tweet_query_id or _GRAPHQL_TWEET_QUERY_ID
+        url = f"https://twitter.com/i/api/graphql/{query_id}/TweetResultByRestId"
+        variables = json.dumps(
+            {
+                "tweetId": tweet_id,
+                "withCommunity": False,
+                "includePromotedContent": False,
+                "withVoice": False,
+            },
+            separators=(",", ":"),
+        )
+        params = {"variables": variables, "features": _GRAPHQL_TWEET_FEATURES}
+        logger.info(
+            f"Cookie GraphQL 推文查询 | tweet_id: {tweet_id} | queryId: {query_id}"
+        )
+        try:
+            response = await self.client.request(
+                "GET", url, headers=headers, params=params
+            )
+            if response.status_code >= 400:
+                logger.warning(
+                    f"GraphQL 推文查询错误响应 [{response.status_code}] | "
+                    f"Body: {response.text[:500]}"
+                )
+            if response.status_code == 401:
+                raise ValueError(
+                    "❌ Cookie GraphQL 认证失败 (401)：auth_token 或 ct0 无效或已过期。\n"
+                    "请重新从浏览器获取最新 auth_token 和 ct0 后更新配置。"
+                )
+            elif response.status_code == 403:
+                raise ValueError(
+                    "❌ Cookie GraphQL 认证失败 (403)：CSRF Token 不匹配或账户存在访问限制。"
+                )
+            elif response.status_code == 404:
+                raise ValueError(
+                    "❌ Cookie GraphQL 请求失败 (404)：queryId 可能已失效。\n"
+                    "请在 WebUI 中更新「graphql_tweet_query_id」字段"
+                    "（浏览器 F12 → Network → 过滤 TweetResultByRestId 获取最新值）。"
+                )
+            elif response.status_code == 429:
+                raise ValueError(
+                    "⚠️ Cookie GraphQL 触发速率限制 (429)：请求过于频繁，请稍后重试。"
+                )
+            elif response.status_code >= 400:
+                raise ValueError(
+                    f"❌ Cookie GraphQL 请求失败 ({response.status_code})："
+                    f"{response.text[:200]}"
+                )
+            gql_data = response.json() if response.text else {}
+            # 检查 GraphQL 层面的不可访问状态
+            tweet_result = (
+                gql_data.get("data", {}).get("tweetResult", {}).get("result", {})
+            )
+            if tweet_result.get("__typename") == "TweetUnavailable":
+                raise FileNotFoundError(f"推文 {tweet_id} 不可访问或已删除")
+            adapted = self._adapt_graphql_tweet_response(gql_data)
+            return {"data": adapted, "headers": dict(response.headers)}
+        except httpx.TimeoutException:
+            raise ValueError("❌ Cookie GraphQL 请求超时，请检查网络或代理配置。")
+        except httpx.ConnectError as e:
+            raise ValueError(f"❌ Cookie GraphQL 连接失败：{str(e)}")
+        except (ValueError, FileNotFoundError):
+            raise
+        except Exception as e:
+            raise ValueError(
+                f"❌ Cookie GraphQL 请求异常：{type(e).__name__} - {str(e)}"
+            )
+
+    async def _make_v1_cookie_request(
+        self,
+        method: str,
+        v2_url: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        使用 Cookie 认证向 Twitter v1.1 内部 API 发起请求，并将结果适配为 v2 格式。
+
+        Twitter v2 API 不接受 Cookie 认证；此方法将 v2 请求路由至对应的 v1.1
+        端点，附加必需的 x-csrf-token / Cookie 头，再将 v1.1 响应转换回 v2
+        兼容格式供上层 Pydantic 模型解析。
+        """
+        if not self.cookie_available:
+            raise ValueError(
+                "❌ Cookie 降级认证失败：未配置 auth_token 或 ct0。\n"
+                "请在 WebUI 中填写「Cookie 降级认证 - auth_token」"
+                "和「Cookie 降级认证 - ct0 (CSRF Token)」。"
+            )
+        await self._ensure_client()
+        headers = self._build_cookie_auth_headers()
+        v1_url, v1_params, endpoint_type = self._translate_v2_to_v1_url(
+            v2_url, params or {}
+        )
+        # 单条推文查询升级至 GraphQL TweetResultByRestId
+        # Twitter v1.1 statuses/show.json 对 Cookie 鉴权已失效（官方 Web 客户端已全面迁移至 GraphQL）
+        if endpoint_type == "tweet":
+            tweet_id = v1_params.get("id", "")
+            return await self._make_graphql_tweet_request(tweet_id, headers)
+        logger.info(
+            f"Cookie 降级认证 → v1.1 API | 端点类型: {endpoint_type} | URL: {v1_url}"
+        )
+        try:
+            response = await self.client.request(
+                method=method, url=v1_url, headers=headers, params=v1_params
+            )
+            if response.status_code >= 400:
+                # 记录完整响应体供诊断，区分"端点失效"与"推文不存在"
+                logger.warning(
+                    f"Cookie v1.1 错误响应 [{response.status_code}] | "
+                    f"URL: {v1_url} | Body: {response.text[:500]}"
+                )
+            if response.status_code == 401:
+                raise ValueError(
+                    "❌ Cookie 降级认证失败 (401)：auth_token 或 ct0 无效或已过期。\n"
+                    "请重新从浏览器开发者工具获取最新 auth_token 和 ct0 后更新配置。"
+                )
+            elif response.status_code == 403:
+                raise ValueError(
+                    "❌ Cookie 降级认证失败 (403)：ct0 (CSRF Token) 与 auth_token "
+                    "不匹配，或账户存在访问限制。"
+                )
+            elif response.status_code == 429:
+                raise ValueError(
+                    "⚠️ Cookie 降级认证触发速率限制 (429)：请求过于频繁，请稍后重试。"
+                )
+            elif response.status_code >= 400:
+                raise ValueError(
+                    f"❌ Cookie 降级认证请求失败 ({response.status_code})："
+                    f"{response.text[:200]}"
+                )
+            v1_data = response.json() if response.text else {}
+            adapted = self._adapt_v1_response(v1_data, endpoint_type)
+            return {"data": adapted, "headers": dict(response.headers)}
+        except httpx.TimeoutException:
+            raise ValueError("❌ Cookie 降级请求超时，请检查网络或代理配置。")
+        except httpx.ConnectError as e:
+            raise ValueError(f"❌ Cookie 降级连接失败：{str(e)}")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(
+                f"❌ Cookie 降级请求异常：{type(e).__name__} - {str(e)}"
+            )
+
     async def _make_request(
         self,
         method: str,
@@ -293,10 +732,11 @@ class XApiClient:
             headers = {}
         
         # 根据认证方案设置请求头（三级降级策略）
-        if use_cookie_fallback and self.fallback_cookie:
-            # 第三级: Cookie 降级方案（用于 TLS 指纹识别绕过或权限限制）
-            headers["Cookie"] = self.fallback_cookie
-            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        if use_cookie_fallback and self.cookie_available:
+            # Cookie 降级：使用 v1.1 内部 API（v2 不接受 Cookie 认证）
+            return await self._make_v1_cookie_request(
+                method=method, v2_url=url, params=params, json_data=json_data
+            )
         elif use_bearer_token and self.bearer_token:
             # 指定端点优先 Bearer Token（如 trends 端点，官方文档要求 Bearer Token 认证）
             headers["Authorization"] = f"Bearer {self.bearer_token}"
@@ -311,13 +751,18 @@ class XApiClient:
         elif self.bearer_token:
             # 第二级: Bearer Token (App-Only)
             headers["Authorization"] = f"Bearer {self.bearer_token}"
+        elif self.cookie_available:
+            # Cookie 降级（主认证模式）：路由到 v1.1 内部 API 通道
+            return await self._make_v1_cookie_request(
+                method=method, v2_url=url, params=params, json_data=json_data
+            )
         else:
             raise ValueError(
                 "❌ 认证失败：未配置任何有效凭据。\n"
                 "请在 WebUI 中配置以下任一认证方式：\n"
                 "1. OAuth 1.0a: Consumer Key/Secret + Access Token/Secret（推荐）\n"
                 "2. Bearer Token（仅限公开数据只读）\n"
-                "3. Cookie 降级认证"
+                "3. Cookie 降级认证（auth_token + ct0）"
             )
         
         headers["User-Agent"] = headers.get("User-Agent", "AstrBot-XAPI-Client/1.0")
@@ -373,16 +818,14 @@ class XApiClient:
                                     }
                             except Exception as e:
                                 logger.debug(f"Bearer Token 降级尝试失败: {e}")
-                    # 最终尝试 Cookie 降级
-                    if self.fallback_cookie:
-                        logger.warning("⚠️ API 返回 403 Forbidden，尝试 Cookie 降级认证...")
-                        return await self._make_request(
+                    # 最终尝试 Cookie 降级（v1.1 内部 API 通道）
+                    if self.cookie_available:
+                        logger.warning("⚠️ API 返回 403 Forbidden，尝试 Cookie 降级认证（v1.1）...")
+                        return await self._make_v1_cookie_request(
                             method=method,
-                            url=url,
-                            headers={k: v for k, v in headers.items() if k not in ("Authorization", "Cookie")},
+                            v2_url=url,
                             params=params,
                             json_data=json_data,
-                            use_cookie_fallback=True
                         )
                 
                 raise ValueError(
@@ -406,6 +849,23 @@ class XApiClient:
                     f"请稍后再试。"
                 )
             
+            elif response.status_code == 402:
+                # 402 Payment Required - API 账户额度耗尽，尝试降级至 Cookie
+                error_msg = response_data.get('detail', response_data.get('message', '未知错误'))
+                if not use_cookie_fallback and self.cookie_available:
+                    logger.warning("⚠️ API 返回 402（账户额度耗尽），尝试 Cookie 降级认证（v1.1）...")
+                    return await self._make_v1_cookie_request(
+                        method=method,
+                        v2_url=url,
+                        params=params,
+                        json_data=json_data,
+                    )
+                raise ValueError(
+                    f"❌ API 额度耗尽 (402)：{error_msg}\n"
+                    f"当前账户无可用请求额度，且未配置 Cookie 降级认证。\n"
+                    f"请在 WebUI 中配置 auth_token 和 ct0 以启用 Cookie 降级模式。"
+                )
+
             elif 400 <= response.status_code < 500:
                 # 其他 4xx 客户端错误
                 error_msg = response_data.get('detail', response_data.get('message', '未知错误'))

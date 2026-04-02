@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.0.1-blue?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v0.0.4-blue?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/license-AGPL--v3-orange?style=flat-square" alt="license">
   <img src="https://img.shields.io/badge/Python-3.10%2B-yellow?style=flat-square" alt="python">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-green?style=flat-square" alt="astrbot">
@@ -53,11 +53,37 @@ pydantic>=2.4.0         # API 响应数据验证
 | **API Bearer Token** | ✅ | X API v2 的 Bearer Token（App-Only 认证） |
 | Consumer Key / Secret | 可选 | OAuth 1.0a 用户上下文认证，拥有更高权限 |
 | Access Token / Secret | 可选 | 与 Consumer Key 配合使用 |
+| **Cookie 降级 - auth_token** | 可选 | API 额度耗尽时的降级认证，见下方获取说明 |
+| **Cookie 降级 - ct0** | 可选 | 与 auth_token 配合使用的 CSRF 令牌，二者缺一不可 |
+| **GraphQL queryId** | 可选 | Cookie 降级单条推文查询专用，留空使用内置默认值；queryId 失效时在此覆写 |
 | 代理地址 | 推荐 | 默认 `http://127.0.0.1:7890`，中国大陆用户必须配置 |
 
-> **认证优先级**：OAuth 1.0a（全部4个凭据） > Bearer Token > Cookie 降级
+> **认证优先级**：OAuth 1.0a（全部4个凭据） > Bearer Token > Cookie 降级（GraphQL / v1.1 内部 API）
 
-  **获取token参见**：X API 官方文档：https://docs.x.com/overview
+  **获取 API Token 参见**：X API 官方文档：https://docs.x.com/overview
+
+### Cookie 降级认证配置说明
+
+当 API 额度耗尽（402）或权限不足（403）时，插件会自动切换到 Twitter v1.1 内部 API 通道，
+此时需要提供浏览器登录后的两个 Cookie 值：
+
+**获取步骤：**
+1. 用浏览器登录 [twitter.com](https://twitter.com)（确保已登录状态）
+2. 按 `F12` 打开开发者工具
+3. 切换到 **Application**（应用程序）选项卡
+4. 左侧展开 **Cookies** → 点击 `https://twitter.com`
+5. 在 Cookie 列表中找到以下两个条目：
+   - `auth_token`：登录凭证，复制「值」列的内容
+   - `ct0`：CSRF 防护令牌，复制「值」列的内容
+6. 将两个值分别填入 WebUI 对应配置项
+
+> ⚠️ **注意事项：**
+> - `auth_token` 与账号密码等效，**请勿泄露**
+> - `ct0` 会定期轮换，若降级认证出现 401/403 时请重新获取
+> - 两个值必须同时填写，缺一不可
+> - Cookie 降级下**单条推文查询**（推文链接自动解析、`/xparse` 解析推文条目）使用 **Twitter GraphQL API**（`TweetResultByRestId`），与 Twitter Web 客户端行为一致
+> - 搜索、时间线、用户查询继续使用 Twitter **v1.1 内部 API**
+> - 若推文链接解析突然失败并日志出现 `GraphQL 推文查询错误响应 [404]`，说明 Twitter 前端已更新 queryId，请在 WebUI「GraphQL queryId」字段填入新值（获取方法：浏览器登录 twitter.com → F12 → Network → 过滤 `TweetResultByRestId` 请求 → 查看请求路径中的 ID 段）
 ---
 
 ## 指令详细说明
@@ -169,7 +195,9 @@ https://twitter.com/username/status/1234567890
 | Consumer Secret | string | `""` | OAuth 1.0a Consumer Secret |
 | Access Token | string | `""` | OAuth 1.0a Access Token |
 | Access Token Secret | string | `""` | OAuth 1.0a Access Token Secret |
-| 降级备用 Cookie | text | `""` | API 额度耗尽时的 Cookie 降级方案 |
+| 降级备用 Cookie - auth_token | text | `""` | 登录凭证 Cookie，与 ct0 配对使用 |
+| 降级备用 Cookie - ct0 | text | `""` | CSRF 防护令牌，与 auth_token 配对使用 |
+| GraphQL 推文查询 ID | string | `""` | Cookie 降级单条推文查询 queryId，留空使用内置默认值 |
 | 启用网络代理 | bool | `true` | 所有请求是否走代理 |
 | 代理地址 | string | `http://127.0.0.1:7890` | HTTP 代理地址 |
 | 最大返回条数 | int | `10` | 单次 API 拉取最大数量（10-20） |
@@ -218,7 +246,7 @@ astrbot_plugin_Xagent_searcher/
 
 - 基于 `httpx.AsyncClient` 实现全异步 HTTP 通信（HTTP/2 + 连接池 + 代理隧道）
 - **OAuth 1.0a HMAC-SHA1 签名**：完整实现 RFC 5849 规范的签名流程（参数收集 → 排序 → 签名基础字符串 → HMAC-SHA1 → Base64 编码）
-- **三级认证降级策略**：OAuth 1.0a → Bearer Token → Cookie 模拟
+- **三级认证降级策略**：OAuth 1.0a → Bearer Token → Cookie 降级（Twitter v1.1 内部 API）
 - 封装 5 个核心 API 端点：推文获取、搜索、用户查询、时间线、热点趋势
 - 延迟初始化模式：HTTP 客户端在首次请求时创建，避免在 `__init__` 中执行网络操作
 

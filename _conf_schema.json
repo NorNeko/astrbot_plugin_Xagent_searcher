@@ -34,12 +34,25 @@
         "default": "",
         "is_sensitive": true
     },
-    "fallback_cookie": {
-        "description": "降级备用 Cookie",
-        "type": "text",
-        "hint": "当官方 API 额度耗尽或遭遇权限限制时，用于激活网页模拟抓取链路的浏览器 Cookie。从浏览器开发者工具中复制完整的 Cookie 字符串。",
+    "cookie_auth_token": {
+        "description": "Cookie 降级认证 - auth_token",
+        "type": "string",
+        "hint": "网页端登录凭证。获取方法：浏览器登录 twitter.com → F12 开发者工具 → Application（应用程序）→ Cookies → https://twitter.com → 找到名为 auth_token 的条目，复制其「值」。⚠️ 此 Token 等同于账号密码，请勿泄露。",
         "default": "",
         "is_sensitive": true
+    },
+    "cookie_ct0": {
+        "description": "Cookie 降级认证 - ct0 (CSRF Token)",
+        "type": "string",
+        "hint": "CSRF 防护令牌，与 auth_token 配合使用，二者缺一不可。获取方法与 auth_token 相同：在同一 Cookies 列表中找到名为 ct0 的条目，复制其「值」。⚠️ ct0 会定期轮换，若降级认证失效请重新获取。",
+        "default": "",
+        "is_sensitive": true
+    },
+    "graphql_tweet_query_id": {
+        "description": "GraphQL 推文查询 ID (TweetResultByRestId)",
+        "type": "string",
+        "hint": "Cookie 降级认证中用于单条推文查询的 GraphQL queryId。内置默认值通常稳定，但 Twitter 前端部署时可能变更。如遇查询失败，可通过浏览器 F12 → Network → 过滤 TweetResultByRestId 请求获取最新值并在此覆写。留空则使用内置默认值。",
+        "default": ""
     },
     "enable_proxy": {
         "description": "启用网络代理",

@@ -6,6 +6,25 @@
 
 ----
 
+## [0.0.4] - 2026-04-03
+
+### Fixed
+
+- **Cookie 单条推文查询失效**：`statuses/show.json`（Twitter v1.1 REST 端点）在 Cookie 认证模式下已停止响应，导致直接发送推文链接时始终返回"推文不存在"。根因为 Twitter Web 客户端早于 2022 年全面迁移至 GraphQL API，v1.1 show 端点对 Cookie 鉴权不再生效，而搜索与时间线 v1.1 端点仍正常工作。
+
+### Changed
+
+- **单条推文查询路由升级至 GraphQL `TweetResultByRestId`**：Cookie 降级模式下，`/xparse` 与推文链接自动解析的单条查询请求现改用 `twitter.com/i/api/graphql/{queryId}/TweetResultByRestId`，与 Twitter Web 客户端行为完全一致。搜索、时间线、用户查询端点保持 v1.1 不变。
+- **新增 `graphql_tweet_query_id` WebUI 配置项**：内置默认 queryId，当 Twitter 前端更新导致 queryId 变更时，用户可在 WebUI 中自行覆写，无需等待插件版本更新。获取方法：浏览器 F12 → Network → 过滤 `TweetResultByRestId` 请求查看路径中的 ID 段。
+- **增强 v1.1 错误诊断日志**：v1.1 端点返回 4xx 时，现将完整响应 Body 记录至 `WARNING` 日志，便于区分"推文真实不存在"与"端点失效"等场景。
+- **`TweetUnavailable` 专项处理**：GraphQL 响应中 `__typename == "TweetUnavailable"` 时直接抛出 `FileNotFoundError`，用户看到明确的"推文不可访问或已删除"提示而非通用错误。
+
+### Compatibility
+
+- 本次更新对上层指令与调用接口无破坏性变更，Cookie 模式下搜索、时间线、用户查询、趋势等功能不受影响。
+
+---
+
 ## [0.0.3] - 2026-03-12
 
 ### Fixed

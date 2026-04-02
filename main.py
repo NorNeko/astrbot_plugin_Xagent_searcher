@@ -93,7 +93,9 @@ class XAgentToolkitPlugin(Star):
                 api_key_secret=self.config.get("api_key_secret", ""),
                 oauth_access_token=self.config.get("oauth_access_token", ""),
                 oauth_access_token_secret=self.config.get("oauth_access_token_secret", ""),
-                fallback_cookie=self.config.get("fallback_cookie", ""),
+                cookie_auth_token=self.config.get("cookie_auth_token", ""),
+                cookie_ct0=self.config.get("cookie_ct0", ""),
+                graphql_tweet_query_id=self.config.get("graphql_tweet_query_id", ""),
                 enable_proxy=self.config.get("enable_proxy", True),
                 proxy_url=self.config.get("proxy_url", "http://127.0.0.1:7890")
             )
