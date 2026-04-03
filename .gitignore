@@ -1,7 +1,2 @@
 __pycache__/
-core/test/
-example/
-IMPLEMENTATION_VERIFICATION.md
-Astrbot X推特插件开发规范.md
-PAGINATION_ASSESSMENT.md
-PROJECT_ARCHITECTURE.md
+create_junction.bat
