@@ -1571,27 +1571,157 @@ class XAgentToolkitPlugin(Star):
                         self.logger.warning(f"图片下载失败: {media.url} - {e}")
                 
                 elif media.type in ("video", "animated_gif") and media.url:
-                    video_tasks.append({"url": media.url, "type": media.type})
+                    video_tasks.append({
+                        "url": media.url,
+                        "type": media.type,
+                        "candidates": self._get_video_variant_candidates(media),
+                    })
         
         # 发送视频（逐条单独发送）
         for video_info in video_tasks:
-            url = video_info["url"]
-            try:
-                intercepted, size = await self.media_processor.should_intercept(url)
-                if intercepted:
-                    fallback = self.media_processor.build_fallback_text(video_info["type"], url, size)
-                    await event.send(event.chain_result([Plain(fallback)]))
-                    continue
-                
-                vid_data = await self.media_processor.download_media(url)
-                if vid_data:
+            sent = False
+            last_error = None
+            fallback_url = video_info["url"]
+            candidates = video_info["candidates"]
+            if self._is_aiocqhttp_event(event):
+                candidates = list(reversed(candidates))
+            for candidate in candidates:
+                url = candidate["url"]
+                fallback_url = url
+                vid_path = None
+                try:
+                    intercepted, size = await self.media_processor.should_intercept(url)
+                    if intercepted:
+                        self.logger.warning(
+                            f"视频变体超过阈值，尝试下一档: {url}"
+                        )
+                        continue
+                    
+                    vid_data = await self.media_processor.download_media(url)
+                    if not vid_data:
+                        self.logger.warning(f"视频变体下载失败，尝试下一档: {url}")
+                        continue
+                    
                     vid_path = self._cache_videos / f"vid_{tweet.id}_{hash(url) & 0xFFFFFFFF}.mp4"
                     vid_path.write_bytes(vid_data)
-                    await event.send(event.chain_result([Video(str(vid_path))]))
-            except Exception as e:
-                self.logger.warning(f"视频发送失败: {url} - {e}")
-        
+                    await event.send(event.chain_result([Video.fromFileSystem(str(vid_path))]))
+                    sent = True
+                    break
+                except Exception as e:
+                    last_error = e
+                    if self._is_rich_media_transfer_failed(e):
+                        self.logger.warning(f"视频命中 QQ 富媒体风控，直接降级为直链: {url} - {e}")
+                    else:
+                        self.logger.warning(f"视频消息发送失败，尝试作为文件上传: {url} - {e}")
+                    if (
+                        vid_path
+                        and not self._is_rich_media_transfer_failed(e)
+                        and await self._upload_video_file_fallback(event, vid_path, url)
+                    ):
+                        sent = True
+                    break
+            if not sent:
+                fallback = (
+                    f"⚠️ 视频发送失败，已降级为直链\n"
+                    f"🔗 原始直链: {fallback_url}"
+                )
+                if last_error:
+                    self.logger.warning(f"视频发送失败，已降级为直链: {fallback_url} - {last_error}")
+                await event.send(event.chain_result([Plain(fallback)]))
+
         return image_components
+
+    def _is_aiocqhttp_event(self, event: AstrMessageEvent) -> bool:
+        """判断当前事件是否来自 aiocqhttp/OneBot 适配器。"""
+        try:
+            if event.get_platform_name() == "aiocqhttp":
+                return True
+        except Exception:
+            pass
+        return getattr(getattr(event, "platform_meta", None), "name", "") == "aiocqhttp"
+
+    def _is_rich_media_transfer_failed(self, error: Exception) -> bool:
+        """
+        识别 QQ NT 富媒体传输风控/拒绝。
+        NapCat 只负责转发 OneBot 动作，错误内容来自 NodeIKernelMsgService/sendMsg。
+        """
+        message = str(error).lower()
+        return (
+            "rich media transfer failed" in message
+            or (
+                "nodeikernelmsgservice/sendmsg" in message
+                and '"result": -1' in message
+            )
+        )
+
+    async def _upload_video_file_fallback(
+        self, event: AstrMessageEvent, vid_path: Path, source_url: str
+    ) -> bool:
+        """
+        aiocqhttp/NapCat 视频消息发送超时时，退化为群/私聊文件上传。
+        返回 True 表示文件已交给 OneBot 上传接口。
+        """
+        if not self._is_aiocqhttp_event(event):
+            return False
+        client = getattr(event, "bot", None)
+        if client is None:
+            return False
+
+        filename = vid_path.name
+        try:
+            group_id = event.get_group_id()
+            if group_id:
+                await client.upload_group_file(
+                    group_id=int(group_id),
+                    file=str(vid_path),
+                    name=filename,
+                )
+            else:
+                await client.upload_private_file(
+                    user_id=int(event.get_sender_id()),
+                    file=str(vid_path),
+                    name=filename,
+                )
+            self.logger.info(f"视频已作为文件上传: {filename} | {source_url}")
+            return True
+        except Exception as e:
+            self.logger.warning(f"视频文件上传兜底失败: {source_url} - {e}")
+            return False
+
+    def _get_video_variant_candidates(self, media) -> list[dict]:
+        """
+        生成视频/GIF 发送候选列表。
+        先尝试 X 返回的最高码率 MP4；如果平台发送超时，再逐级尝试低码率变体。
+        """
+        candidates = []
+        seen_urls = set()
+
+        if media.variants:
+            mp4_variants = [
+                v for v in media.variants
+                if v.content_type
+                and v.content_type.lower() == "video/mp4"
+                and v.url
+            ]
+            mp4_variants.sort(key=lambda v: v.bit_rate or 0, reverse=True)
+            for variant in mp4_variants:
+                if variant.url in seen_urls:
+                    continue
+                seen_urls.add(variant.url)
+                candidates.append({
+                    "url": variant.url,
+                    "bit_rate": variant.bit_rate,
+                    "content_type": variant.content_type,
+                })
+
+        if media.url and media.url not in seen_urls:
+            candidates.append({
+                "url": media.url,
+                "bit_rate": None,
+                "content_type": "video/mp4",
+            })
+
+        return candidates
     
     def _extract_tweet_id_from_url(self, url: str) -> Optional[str]:
         """
